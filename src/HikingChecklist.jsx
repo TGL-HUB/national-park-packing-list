@@ -287,7 +287,7 @@ export default function HikingChecklist() {
         borderBottom: "1px solid rgba(255,255,255,0.08)",
       }}>
         <div style={{ fontSize: 13, letterSpacing: "0.3em", color: "#8aab8a", textTransform: "uppercase", marginBottom: 12 }}>
-          Weekend Trip · Pacific Northwest
+          June 04 – 12th, 2026 · Pacific Northwest
         </div>
         <h1 style={{
           margin: 0,
@@ -297,8 +297,7 @@ export default function HikingChecklist() {
           lineHeight: 1.1,
           letterSpacing: "-0.02em",
         }}>
-          Mount Rainier &<br />
-          <span style={{ color: "#7bb87b", fontStyle: "italic" }}>Olympic</span> Packing List
+          Seattle <span style={{ color: "#7bb87b", fontStyle: "italic" }}>National Park</span> Trip!
         </h1>
         <p style={{ color: "#6b8b6b", marginTop: 14, fontSize: 15, letterSpacing: "0.05em" }}>
           Seattle base · Hiking · Group adventure
