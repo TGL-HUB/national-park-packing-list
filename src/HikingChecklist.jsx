@@ -1,4 +1,8 @@
-import { useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { supabase } from "./supabase";
+
+// ── The trip group. Edit this list to add/rename/remove people. ──────────────
+const PEOPLE = ["Laura", "Jeff", "Kelley", "Doug", "Molly", "Julian", "Emma"];
 
 const categories = [
   {
@@ -120,22 +124,154 @@ const categories = [
   },
 ];
 
-const totalItems = categories.reduce((sum, c) => sum + c.items.length, 0);
+const EMPTY = { checked: {}, custom_items: [], removed_items: [] };
+const PERSON_KEY = "rainier-active-person";
 
 export default function HikingChecklist() {
-  const [checked, setChecked] = useState({});
+  const [person, setPerson] = useState(
+    () => localStorage.getItem(PERSON_KEY) || ""
+  );
+  const [data, setData] = useState(EMPTY);
   const [activeTab, setActiveTab] = useState("all");
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [newItemText, setNewItemText] = useState({}); // categoryId -> input value
+  const saveTimer = useRef(null);
+
+  // Load the selected person's list, and subscribe to live updates.
+  useEffect(() => {
+    if (!person) {
+      setData(EMPTY);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+
+    (async () => {
+      const { data: row } = await supabase
+        .from("person_lists")
+        .select("checked, custom_items, removed_items")
+        .eq("person", person)
+        .maybeSingle();
+      if (cancelled) return;
+      setData(
+        row
+          ? {
+              checked: row.checked || {},
+              custom_items: row.custom_items || [],
+              removed_items: row.removed_items || [],
+            }
+          : EMPTY
+      );
+      setLoading(false);
+    })();
+
+    const channel = supabase
+      .channel(`person:${person}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "person_lists",
+          filter: `person=eq.${person}`,
+        },
+        (payload) => {
+          const row = payload.new;
+          if (!row) return;
+          setData({
+            checked: row.checked || {},
+            custom_items: row.custom_items || [],
+            removed_items: row.removed_items || [],
+          });
+        }
+      )
+      .subscribe();
+
+    return () => {
+      cancelled = true;
+      supabase.removeChannel(channel);
+    };
+  }, [person]);
+
+  // Persist a new state both locally (instant) and to Supabase (debounced).
+  const persist = (next) => {
+    setData(next);
+    if (!person) return;
+    setSaving(true);
+    clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(async () => {
+      await supabase.from("person_lists").upsert(
+        {
+          person,
+          checked: next.checked,
+          custom_items: next.custom_items,
+          removed_items: next.removed_items,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: "person" }
+      );
+      setSaving(false);
+    }, 400);
+  };
+
+  const choosePerson = (name) => {
+    setPerson(name);
+    if (name) localStorage.setItem(PERSON_KEY, name);
+    else localStorage.removeItem(PERSON_KEY);
+  };
 
   const toggle = (id) =>
-    setChecked((prev) => ({ ...prev, [id]: !prev[id] }));
+    persist({ ...data, checked: { ...data.checked, [id]: !data.checked[id] } });
 
-  const checkedCount = Object.values(checked).filter(Boolean).length;
-  const progress = Math.round((checkedCount / totalItems) * 100);
+  const removeItem = (item) => {
+    if (item.custom) {
+      persist({
+        ...data,
+        custom_items: data.custom_items.filter((i) => i.id !== item.id),
+        checked: omit(data.checked, item.id),
+      });
+    } else {
+      persist({
+        ...data,
+        removed_items: [...data.removed_items, item.id],
+        checked: omit(data.checked, item.id),
+      });
+    }
+  };
+
+  const addItem = (categoryId) => {
+    const text = (newItemText[categoryId] || "").trim();
+    if (!text) return;
+    const id = `u_${categoryId}_${Date.now()}`;
+    persist({
+      ...data,
+      custom_items: [...data.custom_items, { id, categoryId, text, custom: true }],
+    });
+    setNewItemText((p) => ({ ...p, [categoryId]: "" }));
+  };
+
+  // Build each category's visible items: base items minus removed, plus custom.
+  const builtCategories = useMemo(() => {
+    const removed = new Set(data.removed_items);
+    return categories.map((cat) => {
+      const base = cat.items
+        .filter((i) => !removed.has(i.id))
+        .map((i) => ({ ...i, custom: false }));
+      const extra = data.custom_items.filter((i) => i.categoryId === cat.id);
+      return { ...cat, items: [...base, ...extra] };
+    });
+  }, [data]);
+
+  const allItems = builtCategories.flatMap((c) => c.items);
+  const totalItems = allItems.length;
+  const checkedCount = allItems.filter((i) => data.checked[i.id]).length;
+  const progress = totalItems ? Math.round((checkedCount / totalItems) * 100) : 0;
 
   const displayCategories =
     activeTab === "all"
-      ? categories
-      : categories.filter((c) => c.id === activeTab);
+      ? builtCategories
+      : builtCategories.filter((c) => c.id === activeTab);
 
   return (
     <div style={{
@@ -168,161 +304,269 @@ export default function HikingChecklist() {
           Seattle base · Hiking · Group adventure
         </p>
 
-        {/* Progress bar */}
-        <div style={{ maxWidth: 400, margin: "28px auto 0" }}>
-          <div style={{
-            display: "flex", justifyContent: "space-between",
-            color: "#8aab8a", fontSize: 13, marginBottom: 8, letterSpacing: "0.05em"
-          }}>
-            <span>{checkedCount} of {totalItems} packed</span>
-            <span>{progress}%</span>
-          </div>
-          <div style={{
-            height: 6, borderRadius: 999,
-            background: "rgba(255,255,255,0.08)",
-            overflow: "hidden",
-          }}>
-            <div style={{
-              height: "100%",
-              width: `${progress}%`,
-              background: "linear-gradient(90deg, #4A7C59, #7bb87b)",
-              borderRadius: 999,
-              transition: "width 0.4s ease",
-            }} />
-          </div>
-          {progress === 100 && (
-            <div style={{ color: "#7bb87b", textAlign: "center", marginTop: 10, fontSize: 14 }}>
-              ✓ You're ready to hit the trail!
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Category tabs */}
-      <div style={{
-        display: "flex", gap: 8,
-        overflowX: "auto", padding: "20px 24px 0",
-        scrollbarWidth: "none",
-        maxWidth: 900, margin: "0 auto",
-      }}>
-        {[{ id: "all", label: "All", icon: "🗺️" }, ...categories].map((c) => {
-          const isActive = activeTab === c.id;
-          return (
-            <button
-              key={c.id}
-              onClick={() => setActiveTab(c.id)}
+        {/* Person selector */}
+        <div style={{ maxWidth: 400, margin: "28px auto 0", textAlign: "left" }}>
+          <label style={{ display: "block", color: "#8aab8a", fontSize: 12, letterSpacing: "0.2em", textTransform: "uppercase", marginBottom: 8 }}>
+            Whose list?
+          </label>
+          <div style={{ position: "relative" }}>
+            <select
+              value={person}
+              onChange={(e) => choosePerson(e.target.value)}
               style={{
-                flexShrink: 0,
-                padding: "8px 18px",
-                borderRadius: 999,
-                border: isActive ? `1.5px solid ${c.color || "#7bb87b"}` : "1.5px solid rgba(255,255,255,0.12)",
-                background: isActive ? `${c.color || "#4A7C59"}22` : "transparent",
-                color: isActive ? (c.color || "#7bb87b") : "#8aab8a",
-                fontSize: 13,
+                width: "100%",
+                appearance: "none",
+                padding: "12px 16px",
+                borderRadius: 10,
+                border: "1.5px solid rgba(123,184,123,0.4)",
+                background: "rgba(74,124,89,0.15)",
+                color: "#e8f0e8",
+                fontSize: 16,
+                fontFamily: "inherit",
                 cursor: "pointer",
-                letterSpacing: "0.05em",
-                transition: "all 0.2s",
-                display: "flex", gap: 6, alignItems: "center",
               }}
             >
-              <span>{c.icon}</span>
-              <span>{c.label}</span>
-            </button>
-          );
-        })}
-      </div>
+              <option value="">— Select your name —</option>
+              {PEOPLE.map((name) => (
+                <option key={name} value={name} style={{ background: "#13241a" }}>
+                  {name}
+                </option>
+              ))}
+            </select>
+            <span style={{ position: "absolute", right: 16, top: "50%", transform: "translateY(-50%)", color: "#7bb87b", pointerEvents: "none" }}>▾</span>
+          </div>
+          <div style={{ minHeight: 16, marginTop: 6, fontSize: 12, color: "#6b8b6b", textAlign: "right" }}>
+            {saving ? "Saving…" : loading ? "Loading…" : person ? "Saved ✓" : ""}
+          </div>
+        </div>
 
-      {/* Category sections */}
-      <div style={{ maxWidth: 900, margin: "0 auto", padding: "24px 24px 0" }}>
-        {displayCategories.map((cat) => {
-          const catChecked = cat.items.filter((i) => checked[i.id]).length;
-          return (
-            <div key={cat.id} style={{
-              marginBottom: 32,
-              background: "rgba(255,255,255,0.03)",
-              borderRadius: 16,
-              border: "1px solid rgba(255,255,255,0.07)",
+        {/* Progress bar (only once a person is chosen) */}
+        {person && (
+          <div style={{ maxWidth: 400, margin: "8px auto 0" }}>
+            <div style={{
+              display: "flex", justifyContent: "space-between",
+              color: "#8aab8a", fontSize: 13, marginBottom: 8, letterSpacing: "0.05em"
+            }}>
+              <span>{checkedCount} of {totalItems} packed</span>
+              <span>{progress}%</span>
+            </div>
+            <div style={{
+              height: 6, borderRadius: 999,
+              background: "rgba(255,255,255,0.08)",
               overflow: "hidden",
             }}>
               <div style={{
-                padding: "20px 24px 16px",
-                borderBottom: "1px solid rgba(255,255,255,0.06)",
-                display: "flex", justifyContent: "space-between", alignItems: "center",
-              }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                  <span style={{ fontSize: 22 }}>{cat.icon}</span>
-                  <div>
-                    <div style={{
-                      color: cat.color, fontSize: 11,
-                      letterSpacing: "0.3em", textTransform: "uppercase", marginBottom: 2,
-                    }}>
-                      Category
+                height: "100%",
+                width: `${progress}%`,
+                background: "linear-gradient(90deg, #4A7C59, #7bb87b)",
+                borderRadius: 999,
+                transition: "width 0.4s ease",
+              }} />
+            </div>
+            {progress === 100 && (
+              <div style={{ color: "#7bb87b", textAlign: "center", marginTop: 10, fontSize: 14 }}>
+                ✓ {person}, you're ready to hit the trail!
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {!person ? (
+        <div style={{ maxWidth: 520, margin: "60px auto", padding: "0 24px", textAlign: "center", color: "#8aab8a", fontSize: 16, lineHeight: 1.7 }}>
+          👋 Pick your name above to open your packing list.<br />
+          Everything you check is saved automatically and syncs for the whole group.
+        </div>
+      ) : (
+        <>
+          {/* Category tabs */}
+          <div style={{
+            display: "flex", gap: 8,
+            overflowX: "auto", padding: "20px 24px 0",
+            scrollbarWidth: "none",
+            maxWidth: 900, margin: "0 auto",
+          }}>
+            {[{ id: "all", label: "All", icon: "🗺️" }, ...categories].map((c) => {
+              const isActive = activeTab === c.id;
+              return (
+                <button
+                  key={c.id}
+                  onClick={() => setActiveTab(c.id)}
+                  style={{
+                    flexShrink: 0,
+                    padding: "8px 18px",
+                    borderRadius: 999,
+                    border: isActive ? `1.5px solid ${c.color || "#7bb87b"}` : "1.5px solid rgba(255,255,255,0.12)",
+                    background: isActive ? `${c.color || "#4A7C59"}22` : "transparent",
+                    color: isActive ? (c.color || "#7bb87b") : "#8aab8a",
+                    fontSize: 13,
+                    cursor: "pointer",
+                    letterSpacing: "0.05em",
+                    transition: "all 0.2s",
+                    display: "flex", gap: 6, alignItems: "center",
+                  }}
+                >
+                  <span>{c.icon}</span>
+                  <span>{c.label}</span>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Category sections */}
+          <div style={{ maxWidth: 900, margin: "0 auto", padding: "24px 24px 0" }}>
+            {displayCategories.map((cat) => {
+              const catChecked = cat.items.filter((i) => data.checked[i.id]).length;
+              return (
+                <div key={cat.id} style={{
+                  marginBottom: 32,
+                  background: "rgba(255,255,255,0.03)",
+                  borderRadius: 16,
+                  border: "1px solid rgba(255,255,255,0.07)",
+                  overflow: "hidden",
+                }}>
+                  <div style={{
+                    padding: "20px 24px 16px",
+                    borderBottom: "1px solid rgba(255,255,255,0.06)",
+                    display: "flex", justifyContent: "space-between", alignItems: "center",
+                  }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                      <span style={{ fontSize: 22 }}>{cat.icon}</span>
+                      <div>
+                        <div style={{
+                          color: cat.color, fontSize: 11,
+                          letterSpacing: "0.3em", textTransform: "uppercase", marginBottom: 2,
+                        }}>
+                          Category
+                        </div>
+                        <div style={{ color: "#e8f0e8", fontSize: 18, fontWeight: "normal" }}>
+                          {cat.label}
+                        </div>
+                      </div>
                     </div>
-                    <div style={{ color: "#e8f0e8", fontSize: 18, fontWeight: "normal" }}>
-                      {cat.label}
+                    <div style={{
+                      background: `${cat.color}22`,
+                      border: `1px solid ${cat.color}44`,
+                      color: cat.color,
+                      borderRadius: 999,
+                      padding: "4px 14px",
+                      fontSize: 13,
+                    }}>
+                      {catChecked}/{cat.items.length}
+                    </div>
+                  </div>
+
+                  <div style={{ padding: "8px 0" }}>
+                    {cat.items.map((item) => {
+                      const isDone = data.checked[item.id];
+                      return (
+                        <div
+                          key={item.id}
+                          style={{
+                            display: "flex", alignItems: "center", gap: 14,
+                            padding: "12px 24px",
+                            transition: "background 0.15s",
+                            background: isDone ? `${cat.color}0a` : "transparent",
+                            borderBottom: "1px solid rgba(255,255,255,0.04)",
+                          }}
+                        >
+                          <div
+                            onClick={() => toggle(item.id)}
+                            style={{
+                              width: 20, height: 20,
+                              borderRadius: 5,
+                              border: isDone ? `2px solid ${cat.color}` : "2px solid rgba(255,255,255,0.2)",
+                              background: isDone ? cat.color : "transparent",
+                              display: "flex", alignItems: "center", justifyContent: "center",
+                              flexShrink: 0,
+                              cursor: "pointer",
+                              transition: "all 0.2s",
+                            }}>
+                            {isDone && (
+                              <svg width="11" height="8" viewBox="0 0 11 8" fill="none">
+                                <path d="M1 4L4 7L10 1" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                              </svg>
+                            )}
+                          </div>
+                          <span
+                            onClick={() => toggle(item.id)}
+                            style={{
+                              flex: 1,
+                              color: isDone ? "#5a7a5a" : "#c8d8c8",
+                              fontSize: 15,
+                              textDecoration: isDone ? "line-through" : "none",
+                              transition: "all 0.2s",
+                              lineHeight: 1.4,
+                              cursor: "pointer",
+                            }}>
+                            {item.text}
+                            {item.custom && (
+                              <span style={{ color: cat.color, fontSize: 11, marginLeft: 8, opacity: 0.8 }}>added</span>
+                            )}
+                          </span>
+                          <button
+                            onClick={() => removeItem(item)}
+                            title="Remove from my list"
+                            style={{
+                              flexShrink: 0,
+                              width: 26, height: 26,
+                              borderRadius: 6,
+                              border: "1px solid rgba(255,255,255,0.1)",
+                              background: "transparent",
+                              color: "#6b8b6b",
+                              cursor: "pointer",
+                              fontSize: 14,
+                              lineHeight: 1,
+                            }}
+                          >
+                            ×
+                          </button>
+                        </div>
+                      );
+                    })}
+
+                    {/* Add-item row */}
+                    <div style={{ display: "flex", gap: 8, padding: "14px 24px 6px" }}>
+                      <input
+                        value={newItemText[cat.id] || ""}
+                        onChange={(e) => setNewItemText((p) => ({ ...p, [cat.id]: e.target.value }))}
+                        onKeyDown={(e) => e.key === "Enter" && addItem(cat.id)}
+                        placeholder={`Add to ${cat.label}…`}
+                        style={{
+                          flex: 1,
+                          padding: "10px 14px",
+                          borderRadius: 10,
+                          border: "1px solid rgba(255,255,255,0.12)",
+                          background: "rgba(255,255,255,0.04)",
+                          color: "#e8f0e8",
+                          fontSize: 14,
+                          fontFamily: "inherit",
+                        }}
+                      />
+                      <button
+                        onClick={() => addItem(cat.id)}
+                        style={{
+                          flexShrink: 0,
+                          padding: "0 18px",
+                          borderRadius: 10,
+                          border: `1px solid ${cat.color}66`,
+                          background: `${cat.color}22`,
+                          color: cat.color,
+                          fontSize: 14,
+                          cursor: "pointer",
+                          fontFamily: "inherit",
+                        }}
+                      >
+                        + Add
+                      </button>
                     </div>
                   </div>
                 </div>
-                <div style={{
-                  background: `${cat.color}22`,
-                  border: `1px solid ${cat.color}44`,
-                  color: cat.color,
-                  borderRadius: 999,
-                  padding: "4px 14px",
-                  fontSize: 13,
-                }}>
-                  {catChecked}/{cat.items.length}
-                </div>
-              </div>
-
-              <div style={{ padding: "8px 0" }}>
-                {cat.items.map((item, idx) => {
-                  const isDone = checked[item.id];
-                  return (
-                    <div
-                      key={item.id}
-                      onClick={() => toggle(item.id)}
-                      style={{
-                        display: "flex", alignItems: "center", gap: 14,
-                        padding: "12px 24px",
-                        cursor: "pointer",
-                        transition: "background 0.15s",
-                        background: isDone ? `${cat.color}0a` : "transparent",
-                        borderBottom: idx < cat.items.length - 1 ? "1px solid rgba(255,255,255,0.04)" : "none",
-                      }}
-                    >
-                      <div style={{
-                        width: 20, height: 20,
-                        borderRadius: 5,
-                        border: isDone ? `2px solid ${cat.color}` : "2px solid rgba(255,255,255,0.2)",
-                        background: isDone ? cat.color : "transparent",
-                        display: "flex", alignItems: "center", justifyContent: "center",
-                        flexShrink: 0,
-                        transition: "all 0.2s",
-                      }}>
-                        {isDone && (
-                          <svg width="11" height="8" viewBox="0 0 11 8" fill="none">
-                            <path d="M1 4L4 7L10 1" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-                          </svg>
-                        )}
-                      </div>
-                      <span style={{
-                        color: isDone ? "#5a7a5a" : "#c8d8c8",
-                        fontSize: 15,
-                        textDecoration: isDone ? "line-through" : "none",
-                        transition: "all 0.2s",
-                        lineHeight: 1.4,
-                      }}>
-                        {item.text}
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          );
-        })}
-      </div>
+              );
+            })}
+          </div>
+        </>
+      )}
 
       {/* Footer tips */}
       <div style={{ maxWidth: 900, margin: "0 auto", padding: "0 24px" }}>
@@ -346,4 +590,10 @@ export default function HikingChecklist() {
       </div>
     </div>
   );
+}
+
+function omit(obj, key) {
+  const next = { ...obj };
+  delete next[key];
+  return next;
 }
