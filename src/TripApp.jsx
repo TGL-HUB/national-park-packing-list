@@ -609,7 +609,7 @@ export default function TripApp({ data }) {
       </div>
 
       {tab === "pack" ? (
-        <HikingChecklist />
+        <HikingChecklist people={reference.people || []} />
       ) : (
         <main style={{ maxWidth: 820, margin: "0 auto", padding: "12px 16px 60px" }}>
           {/* map */}
