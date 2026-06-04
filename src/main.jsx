@@ -1,9 +1,9 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
-import TripApp from './TripApp.jsx'
+import Gate from './Gate.jsx'
 
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
-    <TripApp />
+    <Gate />
   </React.StrictMode>
 )

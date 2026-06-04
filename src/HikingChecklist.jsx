@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { supabase } from "./supabase";
+import { getList, putList } from "./api.js";
 
 // ── The trip group. Edit this list to add/rename/remove people. ──────────────
 const PEOPLE = ["Laura", "Jeff", "Kelley", "Doug", "Molly", "Julian", "Emma"];
@@ -137,60 +137,44 @@ export default function HikingChecklist() {
   const [saving, setSaving] = useState(false);
   const [newItemText, setNewItemText] = useState({}); // categoryId -> input value
   const saveTimer = useRef(null);
+  const lastEditAt = useRef(0);
 
-  // Load the selected person's list, and subscribe to live updates.
+  // Load the selected person's list, then poll for updates from other devices.
   useEffect(() => {
     if (!person) {
       setData(EMPTY);
       return;
     }
     let cancelled = false;
-    setLoading(true);
 
-    (async () => {
-      const { data: row } = await supabase
-        .from("person_lists")
-        .select("checked, custom_items, removed_items")
-        .eq("person", person)
-        .maybeSingle();
-      if (cancelled) return;
-      setData(
-        row
-          ? {
-              checked: row.checked || {},
-              custom_items: row.custom_items || [],
-              removed_items: row.removed_items || [],
-            }
-          : EMPTY
-      );
-      setLoading(false);
-    })();
+    const load = async (showSpinner) => {
+      if (showSpinner) setLoading(true);
+      try {
+        const row = await getList(person);
+        if (cancelled) return;
+        setData({
+          checked: row.checked || {},
+          custom_items: row.custom_items || [],
+          removed_items: row.removed_items || [],
+        });
+      } catch {
+        if (!cancelled) setData(EMPTY);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
 
-    const channel = supabase
-      .channel(`person:${person}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "person_lists",
-          filter: `person=eq.${person}`,
-        },
-        (payload) => {
-          const row = payload.new;
-          if (!row) return;
-          setData({
-            checked: row.checked || {},
-            custom_items: row.custom_items || [],
-            removed_items: row.removed_items || [],
-          });
-        }
-      )
-      .subscribe();
+    load(true);
+
+    // Realtime is gone now that the database is locked down — poll instead, but
+    // don't clobber an edit the user just made on this device.
+    const id = setInterval(() => {
+      if (Date.now() - lastEditAt.current > 3000) load(false);
+    }, 15000);
 
     return () => {
       cancelled = true;
-      supabase.removeChannel(channel);
+      clearInterval(id);
     };
   }, [person]);
 
@@ -198,20 +182,20 @@ export default function HikingChecklist() {
   const persist = (next) => {
     setData(next);
     if (!person) return;
+    lastEditAt.current = Date.now();
     setSaving(true);
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(async () => {
-      await supabase.from("person_lists").upsert(
-        {
+      try {
+        await putList({
           person,
           checked: next.checked,
           custom_items: next.custom_items,
           removed_items: next.removed_items,
-          updated_at: new Date().toISOString(),
-        },
-        { onConflict: "person" }
-      );
-      setSaving(false);
+        });
+      } finally {
+        setSaving(false);
+      }
     }, 400);
   };
 

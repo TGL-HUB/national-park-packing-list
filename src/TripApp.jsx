@@ -1,13 +1,12 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { TRIP, CREW, RESERVATIONS, DAYS as DEFAULT_DAYS, FUN_FACTS } from "./tripData.js";
-import { supabase } from "./supabase.js";
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { getTrip, putTrip } from "./api.js";
 import HikingChecklist from "./HikingChecklist.jsx";
 
-// The shared itinerary lives in one reserved row of the existing person_lists
-// table (the days array is stored in its `custom_items` jsonb column). This
-// reuses the table's working RLS + realtime, so edits sync live to the whole
-// team with no extra schema. Swap to a dedicated table later if desired.
-const ITINERARY_KEY = "__itinerary__";
+// Reference trip data (crew, reservations, fun facts, base location) is fetched
+// from the gated API after login and shared via context, so it never ships in
+// the public bundle.
+const TripDataContext = createContext(null);
+const useTripData = () => useContext(TripDataContext);
 
 // ── tiny style helpers ───────────────────────────────────────────────────────
 const card = {
@@ -61,6 +60,7 @@ function useCountdown(targetISO) {
 
 // ── Interactive Leaflet map ──────────────────────────────────────────────────
 function TripMap({ activeDay, allDays }) {
+  const { trip: TRIP } = useTripData();
   const elRef = useRef(null);
   const mapRef = useRef(null);
   const layerRef = useRef(null);
@@ -146,6 +146,7 @@ function TripMap({ activeDay, allDays }) {
 
 // ── Fun-fact shuffler ────────────────────────────────────────────────────────
 function FunFact() {
+  const { funFacts: FUN_FACTS } = useTripData();
   const [i, setI] = useState(0);
   const next = () => setI((p) => (p + 1 + Math.floor(Math.random() * (FUN_FACTS.length - 1))) % FUN_FACTS.length);
   const f = FUN_FACTS[i];
@@ -190,6 +191,7 @@ const WX_ZONES = [
 ];
 
 function WeatherStrip() {
+  const { trip: TRIP } = useTripData();
   const [state, setState] = useState({ status: "loading", days: [] });
 
   useEffect(() => {
@@ -476,12 +478,16 @@ function DayCard({ day, open, onToggle, isActive, editMode, openStop, setOpenSto
 }
 
 // ── Main app ─────────────────────────────────────────────────────────────────
-export default function TripApp() {
+export default function TripApp({ data }) {
+  const { reference, defaultDays, days: initialDays } = data;
+  const { trip: TRIP, crew: CREW, reservations: RESERVATIONS } = reference;
+  const DEFAULT_DAYS = defaultDays;
+
   const [tab, setTab] = useState("trip"); // 'trip' | 'pack'
   const [openDay, setOpenDay] = useState(2);
   const [openStop, setOpenStop] = useState(null);
   const [editMode, setEditMode] = useState(false);
-  const [days, setDays] = useState(() => withIds(DEFAULT_DAYS));
+  const [days, setDays] = useState(() => withIds(initialDays));
   const [sync, setSync] = useState("idle"); // 'idle'|'saving'|'synced'|'offline'
   const { days: countdown, started } = useCountdown(TRIP.startDate);
 
@@ -494,47 +500,35 @@ export default function TripApp() {
     window.scrollTo(0, 0);
   }, []);
 
-  // Load the shared itinerary + subscribe to live edits from the team.
+  // Reflect the trip title in the tab only once authenticated (the public page
+  // title stays generic so nothing leaks before sign-in).
+  useEffect(() => {
+    document.title = `${TRIP.title} · Trip`;
+  }, [TRIP.title]);
+
+  // Poll for the team's edits. The database is locked down so realtime is gone;
+  // instead refetch periodically and whenever the tab regains focus — but never
+  // clobber an edit the user just made locally.
   useEffect(() => {
     let cancelled = false;
-    (async () => {
-      const { data, error } = await supabase
-        .from("person_lists")
-        .select("custom_items")
-        .eq("person", ITINERARY_KEY)
-        .maybeSingle();
-      if (cancelled) return;
-      if (!error && data && Array.isArray(data.custom_items) && data.custom_items.length) {
-        setDays(withIds(data.custom_items));
-      } else if (!error) {
-        // Seed the shared baseline from the default plan (best-effort).
-        const seeded = withIds(DEFAULT_DAYS);
-        supabase
-          .from("person_lists")
-          .upsert(
-            { person: ITINERARY_KEY, custom_items: seeded, checked: {}, removed_items: [], updated_at: new Date().toISOString() },
-            { onConflict: "person" }
-          );
+    const refresh = async () => {
+      if (Date.now() - lastEditAt.current < 3000) return;
+      try {
+        const t = await getTrip();
+        if (!cancelled && Array.isArray(t.days)) setDays(withIds(t.days));
+      } catch {
+        /* keep showing what we already have */
       }
-    })();
-
-    const channel = supabase
-      .channel("itinerary")
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "person_lists", filter: `person=eq.${ITINERARY_KEY}` },
-        (payload) => {
-          // Ignore remote echoes while actively editing to avoid clobbering keystrokes.
-          if (Date.now() - lastEditAt.current < 1500) return;
-          const row = payload.new;
-          if (row && Array.isArray(row.custom_items)) setDays(withIds(row.custom_items));
-        }
-      )
-      .subscribe();
-
+    };
+    const id = setInterval(refresh, 15000);
+    const onVis = () => {
+      if (document.visibilityState === "visible") refresh();
+    };
+    document.addEventListener("visibilitychange", onVis);
     return () => {
       cancelled = true;
-      supabase.removeChannel(channel);
+      clearInterval(id);
+      document.removeEventListener("visibilitychange", onVis);
     };
   }, []);
 
@@ -545,11 +539,12 @@ export default function TripApp() {
     setSync("saving");
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(async () => {
-      const { error } = await supabase.from("person_lists").upsert(
-        { person: ITINERARY_KEY, custom_items: next, checked: {}, removed_items: [], updated_at: new Date().toISOString() },
-        { onConflict: "person" }
-      );
-      setSync(error ? "offline" : "synced");
+      try {
+        await putTrip(next);
+        setSync("synced");
+      } catch {
+        setSync("offline");
+      }
     }, 600);
   };
 
@@ -584,6 +579,7 @@ export default function TripApp() {
   const syncLabel = { idle: "", saving: "Saving…", synced: "✓ Synced to the team", offline: "⚠ Saved on this device only" }[sync];
 
   return (
+    <TripDataContext.Provider value={reference}>
     <div style={{ minHeight: "100vh", background: "linear-gradient(180deg,#e6f3f7 0%,#eef6f1 60%,#f6f4ee 100%)", fontFamily: "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif", color: "#0b3d4f" }}>
       {/* hero */}
       <header style={{ background: "linear-gradient(135deg,#0b3d4f 0%,#10566b 45%,#1c7e7a 100%)", color: "white", padding: "34px 20px 30px", textAlign: "center", position: "relative", overflow: "hidden" }}>
@@ -738,5 +734,6 @@ export default function TripApp() {
         </main>
       )}
     </div>
+    </TripDataContext.Provider>
   );
 }
