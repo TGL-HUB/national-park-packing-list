@@ -1,9 +1,9 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
-import HikingChecklist from './HikingChecklist.jsx'
+import TripApp from './TripApp.jsx'
 
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
-    <HikingChecklist />
+    <TripApp />
   </React.StrictMode>
 )
