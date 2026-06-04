@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { TRIP, CREW, LOGISTICS, RESERVATIONS, DAYS as DEFAULT_DAYS, FUN_FACTS } from "./tripData.js";
+import { TRIP, CREW, RESERVATIONS, DAYS as DEFAULT_DAYS, FUN_FACTS } from "./tripData.js";
 import { supabase } from "./supabase.js";
 import HikingChecklist from "./HikingChecklist.jsx";
 
@@ -161,6 +161,133 @@ function FunFact() {
       <div style={{ display: "flex", gap: 14, alignItems: "center" }}>
         <div style={{ fontSize: 38, lineHeight: 1 }}>{f.icon}</div>
         <div style={{ fontSize: 16, lineHeight: 1.45 }}>{f.text}</div>
+      </div>
+    </div>
+  );
+}
+
+// ── Live weather for the area (Open-Meteo, free + keyless) ───────────────────
+function wx(code) {
+  const m = {
+    0: ["☀️", "Clear"], 1: ["🌤️", "Mainly clear"], 2: ["⛅", "Partly cloudy"], 3: ["☁️", "Overcast"],
+    45: ["🌫️", "Fog"], 48: ["🌫️", "Fog"],
+    51: ["🌦️", "Light drizzle"], 53: ["🌦️", "Drizzle"], 55: ["🌦️", "Drizzle"],
+    56: ["🌧️", "Freezing drizzle"], 57: ["🌧️", "Freezing drizzle"],
+    61: ["🌧️", "Light rain"], 63: ["🌧️", "Rain"], 65: ["🌧️", "Heavy rain"],
+    66: ["🌧️", "Freezing rain"], 67: ["🌧️", "Freezing rain"],
+    71: ["🌨️", "Light snow"], 73: ["🌨️", "Snow"], 75: ["🌨️", "Heavy snow"], 77: ["🌨️", "Snow"],
+    80: ["🌦️", "Showers"], 81: ["🌦️", "Showers"], 82: ["⛈️", "Heavy showers"],
+    85: ["🌨️", "Snow showers"], 86: ["🌨️", "Snow showers"],
+    95: ["⛈️", "Thunderstorm"], 96: ["⛈️", "Thunderstorm"], 99: ["⛈️", "Thunderstorm"],
+  };
+  return m[code] || ["🌡️", "—"];
+}
+
+const WX_ZONES = [
+  { icon: "🏙️", area: "Puget Sound & Seattle", note: "Mild — highs in the 60s–70s°F with a few passing showers." },
+  { icon: "🏔️", area: "Mountains (Rainier / Cascades)", note: "Cooler 40s–60s°F; snow still lingers up at Paradise. Pack layers." },
+  { icon: "🌧️", area: "Rainforest & coast (Hoh / Rialto)", note: "Cool and damp — bring a waterproof shell." },
+];
+
+function WeatherStrip() {
+  const [state, setState] = useState({ status: "loading", days: [] });
+
+  useEffect(() => {
+    let cancelled = false;
+    const [lat, lon] = TRIP.base.coords;
+    const url =
+      `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}` +
+      `&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max` +
+      `&temperature_unit=fahrenheit&timezone=America%2FLos_Angeles` +
+      `&start_date=${TRIP.startDate}&end_date=${TRIP.endDate}`;
+    fetch(url)
+      .then((r) => r.json())
+      .then((j) => {
+        if (cancelled) return;
+        const d = j && j.daily;
+        if (!d || !Array.isArray(d.time) || d.time.length === 0) {
+          setState({ status: "fallback", days: [] });
+          return;
+        }
+        const days = d.time.map((t, i) => ({
+          date: t,
+          code: d.weather_code[i],
+          hi: Math.round(d.temperature_2m_max[i]),
+          lo: Math.round(d.temperature_2m_min[i]),
+          precip: d.precipitation_probability_max ? d.precipitation_probability_max[i] : null,
+        }));
+        setState({ status: "ok", days });
+      })
+      .catch(() => {
+        if (!cancelled) setState({ status: "fallback", days: [] });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const fmt = (iso) => {
+    const [y, m, dd] = iso.split("-").map(Number);
+    const date = new Date(y, m - 1, dd);
+    return { wd: date.toLocaleDateString("en-US", { weekday: "short" }), md: `${m}/${dd}` };
+  };
+
+  return (
+    <div>
+      {state.status === "ok" && (
+        <div style={{ ...card, padding: "12px 6px 14px", marginBottom: 10 }}>
+          <div style={{ display: "flex", gap: 8, overflowX: "auto", padding: "0 8px", WebkitOverflowScrolling: "touch" }}>
+            {state.days.map((d) => {
+              const [emoji, label] = wx(d.code);
+              const { wd, md } = fmt(d.date);
+              return (
+                <div
+                  key={d.date}
+                  title={label}
+                  style={{ flex: "0 0 auto", width: 76, textAlign: "center", padding: "8px 6px", borderRadius: 14, background: "linear-gradient(180deg,#f0f8fb,#ffffff)", border: "1px solid #0b3d4f12" }}
+                >
+                  <div style={{ fontSize: 12, fontWeight: 800, color: "#0b3d4f" }}>{wd}</div>
+                  <div style={{ fontSize: 11, color: "#94a3b8", marginBottom: 2 }}>{md}</div>
+                  <div style={{ fontSize: 26, lineHeight: 1.2 }}>{emoji}</div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "#0b3d4f", marginTop: 2 }}>
+                    {d.hi}°<span style={{ color: "#94a3b8", fontWeight: 600 }}>/{d.lo}°</span>
+                  </div>
+                  {d.precip != null && (
+                    <div style={{ fontSize: 11, color: "#3b82c4", fontWeight: 700, marginTop: 1 }}>💧{d.precip}%</div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          <div style={{ fontSize: 11, color: "#94a3b8", textAlign: "center", marginTop: 8 }}>
+            Live forecast for the Puget Sound base · °F · the parks run cooler & wetter
+          </div>
+        </div>
+      )}
+
+      {state.status === "loading" && (
+        <div style={{ ...card, padding: "18px", textAlign: "center", color: "#64748b", fontSize: 14, marginBottom: 10 }}>
+          Loading the latest forecast… 🌤️
+        </div>
+      )}
+
+      {state.status === "fallback" && (
+        <div style={{ ...card, padding: "14px 16px", marginBottom: 10, fontSize: 13.5, color: "#475569" }}>
+          🗓️ Live forecast isn't available for these dates yet — here's what early June usually looks like in the area.
+        </div>
+      )}
+
+      {/* what to expect by environment — always shown */}
+      <div style={{ display: "grid", gap: 8 }}>
+        {WX_ZONES.map((z) => (
+          <div key={z.area} style={{ ...card, padding: "12px 14px", display: "flex", gap: 12, alignItems: "center" }}>
+            <div style={{ fontSize: 22 }}>{z.icon}</div>
+            <div>
+              <div style={{ fontSize: 14, fontWeight: 800, color: "#0b3d4f" }}>{z.area}</div>
+              <div style={{ fontSize: 13, color: "#64748b" }}>{z.note}</div>
+            </div>
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -599,20 +726,10 @@ export default function TripApp() {
             </div>
           </section>
 
-          {/* logistics */}
+          {/* weather */}
           <section style={{ marginTop: 22 }}>
-            <h2 style={{ fontSize: 18, margin: "0 4px 10px" }}>🚙 Good to Know</h2>
-            <div style={{ display: "grid", gap: 8 }}>
-              {LOGISTICS.map((l, i) => (
-                <div key={i} style={{ ...card, padding: "12px 14px", display: "flex", gap: 12, alignItems: "center" }}>
-                  <div style={{ fontSize: 22 }}>{l.icon}</div>
-                  <div>
-                    <div style={{ fontSize: 12, color: "#94a3b8", fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5 }}>{l.label}</div>
-                    <div style={{ fontSize: 14, color: "#0b3d4f" }}>{l.value}</div>
-                  </div>
-                </div>
-              ))}
-            </div>
+            <h2 style={{ fontSize: 18, margin: "0 4px 10px" }}>🌤️ Weather in the Area</h2>
+            <WeatherStrip />
           </section>
 
           <footer style={{ textAlign: "center", marginTop: 36, color: "#94a3b8", fontSize: 13 }}>
