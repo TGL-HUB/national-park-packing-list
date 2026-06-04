@@ -1,9 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getList, putList } from "./api.js";
 
-// ── The trip group. Edit this list to add/rename/remove people. ──────────────
-const PEOPLE = ["Laura", "Jeff", "Kelley", "Doug", "Molly", "Julian", "Emma"];
-
 const categories = [
   {
     id: "clothes",
@@ -127,7 +124,7 @@ const categories = [
 const EMPTY = { checked: {}, custom_items: [], removed_items: [] };
 const PERSON_KEY = "rainier-active-person";
 
-export default function HikingChecklist() {
+export default function HikingChecklist({ people = [] }) {
   const [person, setPerson] = useState(
     () => localStorage.getItem(PERSON_KEY) || ""
   );
@@ -310,7 +307,7 @@ export default function HikingChecklist() {
               }}
             >
               <option value="">— Select your name —</option>
-              {PEOPLE.map((name) => (
+              {people.map((name) => (
                 <option key={name} value={name} style={{ background: "#13241a" }}>
                   {name}
                 </option>

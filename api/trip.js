@@ -1,6 +1,6 @@
 import { requireAuth } from "../lib/auth.js";
 import { getAdminClient, readJson } from "../lib/supabaseAdmin.js";
-import { TRIP, CREW, LOGISTICS, RESERVATIONS, DAYS, FUN_FACTS } from "../lib/tripData.js";
+import { TRIP, CREW, LOGISTICS, RESERVATIONS, DAYS, FUN_FACTS, PEOPLE } from "../lib/tripData.js";
 
 // The shared itinerary lives in one reserved row of the person_lists table
 // (the days array is stored in its `custom_items` jsonb column).
@@ -29,7 +29,7 @@ export default async function handler(req, res) {
     }
 
     return res.status(200).json({
-      reference: { trip: TRIP, crew: CREW, logistics: LOGISTICS, reservations: RESERVATIONS, funFacts: FUN_FACTS },
+      reference: { trip: TRIP, crew: CREW, logistics: LOGISTICS, reservations: RESERVATIONS, funFacts: FUN_FACTS, people: PEOPLE },
       defaultDays: DAYS,
       days,
     });
