@@ -185,14 +185,21 @@ function wx(code) {
 }
 
 const WX_ZONES = [
-  { icon: "🏙️", area: "Puget Sound & Seattle", note: "Mild — highs in the 60s–70s°F with a few passing showers." },
-  { icon: "🏔️", area: "Mountains (Rainier / Cascades)", note: "Cooler 40s–60s°F; snow still lingers up at Paradise. Pack layers." },
-  { icon: "🌧️", area: "Rainforest & coast (Hoh / Rialto)", note: "Cool and damp — bring a waterproof shell." },
+  { icon: "🏙️", area: "Puget Sound & Seattle", note: "Mild — highs in the 60s–70s°F with a few passing showers.", coords: [47.6062, -122.3321] },
+  { icon: "🏔️", area: "Mountains (Rainier / Cascades)", note: "Cooler 40s–60s°F; snow still lingers up at Paradise. Pack layers.", coords: [46.7860, -121.7350] },
+  { icon: "🌧️", area: "Rainforest & coast (Hoh / Rialto)", note: "Cool and damp — bring a waterproof shell.", coords: [47.8606, -123.9348] },
 ];
+
+// Deep-link to The Weather Channel's 10-day forecast for any lat/lon.
+function weatherSiteUrl(coords) {
+  const [lat, lon] = coords;
+  return `https://weather.com/weather/tenday/l/${lat},${lon}`;
+}
 
 function WeatherStrip() {
   const { trip: TRIP } = useTripData();
   const [state, setState] = useState({ status: "loading", days: [] });
+  const baseWeatherUrl = weatherSiteUrl(TRIP.base.coords);
 
   useEffect(() => {
     let cancelled = false;
@@ -202,15 +209,22 @@ function WeatherStrip() {
       `&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max` +
       `&temperature_unit=fahrenheit&timezone=America%2FLos_Angeles` +
       `&start_date=${TRIP.startDate}&end_date=${TRIP.endDate}`;
-    fetch(url)
-      .then((r) => r.json())
-      .then((j) => {
-        if (cancelled) return;
+
+    // Open-Meteo is free but occasionally flaky (502s) or slow to respond.
+    // Each attempt has a hard timeout (so a hung request can't get stuck on
+    // "Loading…") and we retry twice before falling back to seasonal guidance.
+    const MAX_ATTEMPTS = 3;
+    async function load(attempt) {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 4500);
+      try {
+        const r = await fetch(url, { signal: ctrl.signal });
+        clearTimeout(timer);
+        if (!r.ok) throw new Error("http " + r.status);
+        const j = await r.json();
         const d = j && j.daily;
-        if (!d || !Array.isArray(d.time) || d.time.length === 0) {
-          setState({ status: "fallback", days: [] });
-          return;
-        }
+        if (!d || !Array.isArray(d.time) || d.time.length === 0) throw new Error("empty");
+        if (cancelled) return;
         const days = d.time.map((t, i) => ({
           date: t,
           code: d.weather_code[i],
@@ -219,10 +233,14 @@ function WeatherStrip() {
           precip: d.precipitation_probability_max ? d.precipitation_probability_max[i] : null,
         }));
         setState({ status: "ok", days });
-      })
-      .catch(() => {
-        if (!cancelled) setState({ status: "fallback", days: [] });
-      });
+      } catch (e) {
+        clearTimeout(timer);
+        if (cancelled) return;
+        if (attempt < MAX_ATTEMPTS) setTimeout(() => load(attempt + 1), 700 * attempt);
+        else setState({ status: "fallback", days: [] });
+      }
+    }
+    load(1);
     return () => {
       cancelled = true;
     };
@@ -234,10 +252,16 @@ function WeatherStrip() {
     return { wd: date.toLocaleDateString("en-US", { weekday: "short" }), md: `${m}/${dd}` };
   };
 
+  const openWx = (url) => window.open(url, "_blank", "noopener,noreferrer");
+
   return (
     <div>
       {state.status === "ok" && (
-        <div style={{ ...card, padding: "12px 6px 14px", marginBottom: 10 }}>
+        <div
+          onClick={() => openWx(baseWeatherUrl)}
+          title="Open the full 10-day forecast on weather.com"
+          style={{ ...card, padding: "12px 6px 14px", marginBottom: 10, cursor: "pointer" }}
+        >
           <div style={{ display: "flex", gap: 8, overflowX: "auto", padding: "0 8px", WebkitOverflowScrolling: "touch" }}>
             {state.days.map((d) => {
               const [emoji, label] = wx(d.code);
@@ -261,8 +285,8 @@ function WeatherStrip() {
               );
             })}
           </div>
-          <div style={{ fontSize: 11, color: "#94a3b8", textAlign: "center", marginTop: 8 }}>
-            Live forecast for the Puget Sound base · °F · the parks run cooler & wetter
+          <div style={{ fontSize: 11, color: "#3b82c4", textAlign: "center", marginTop: 8, fontWeight: 600 }}>
+            Tap for the full 10-day forecast on weather.com ↗
           </div>
         </div>
       )}
@@ -274,20 +298,31 @@ function WeatherStrip() {
       )}
 
       {state.status === "fallback" && (
-        <div style={{ ...card, padding: "14px 16px", marginBottom: 10, fontSize: 13.5, color: "#475569" }}>
-          🗓️ Live forecast isn't available for these dates yet — here's what early June usually looks like in the area.
+        <div
+          onClick={() => openWx(baseWeatherUrl)}
+          title="Open the live forecast on weather.com"
+          style={{ ...card, padding: "14px 16px", marginBottom: 10, fontSize: 13.5, color: "#475569", cursor: "pointer" }}
+        >
+          🌤️ Here's what early June usually looks like in the area.{" "}
+          <span style={{ color: "#3b82c4", fontWeight: 700, whiteSpace: "nowrap" }}>Tap for the live forecast on weather.com ↗</span>
         </div>
       )}
 
-      {/* what to expect by environment — always shown */}
+      {/* what to expect by environment — tap any to open that area's forecast */}
       <div style={{ display: "grid", gap: 8 }}>
         {WX_ZONES.map((z) => (
-          <div key={z.area} style={{ ...card, padding: "12px 14px", display: "flex", gap: 12, alignItems: "center" }}>
+          <div
+            key={z.area}
+            onClick={() => openWx(weatherSiteUrl(z.coords))}
+            title={`Open the forecast for ${z.area} on weather.com`}
+            style={{ ...card, padding: "12px 14px", display: "flex", gap: 12, alignItems: "center", cursor: "pointer" }}
+          >
             <div style={{ fontSize: 22 }}>{z.icon}</div>
-            <div>
+            <div style={{ flex: 1 }}>
               <div style={{ fontSize: 14, fontWeight: 800, color: "#0b3d4f" }}>{z.area}</div>
               <div style={{ fontSize: 13, color: "#64748b" }}>{z.note}</div>
             </div>
+            <div style={{ fontSize: 16, color: "#3b82c4" }}>↗</div>
           </div>
         ))}
       </div>
